@@ -34,14 +34,13 @@ function getBase64(filePath) {
     return `data:${mime};base64,${data.toString('base64')}`;
 }
 
-// 3. Инлайним ВСЕ CSS (<link rel="stylesheet">)
-html = html.replace(/<link\s+rel="stylesheet"\s+href="([^"]+)">/g, (match, cssPath) => {
+// 3. Инлайним ВСЕ CSS (<link ... href="...">)
+html = html.replace(/<link[^>]*?href="([^"]+\.css)"[^>]*>/g, (match, cssPath) => {
     const fullCssPath = path.join(buildPath, cssPath);
     if (fs.existsSync(fullCssPath)) {
         let cssContent = fs.readFileSync(fullCssPath, 'utf8');
-        // Внутри CSS тоже могут быть ссылки на картинки/шрифты (url("..."))
         cssContent = cssContent.replace(/url\(['"]?([^'"()]+)['"]?\)/g, (urlMatch, assetPath) => {
-            if (assetPath.startsWith('data:')) return urlMatch; // уже base64
+            if (assetPath.startsWith('data:')) return urlMatch;
             const absoluteAssetPath = path.resolve(path.dirname(fullCssPath), assetPath);
             const b64 = getBase64(absoluteAssetPath);
             return b64 ? `url(${b64})` : urlMatch;
@@ -49,19 +48,25 @@ html = html.replace(/<link\s+rel="stylesheet"\s+href="([^"]+)">/g, (match, cssPa
         console.log(`[CSS] Встроено: ${cssPath}`);
         return `<style>\n${cssContent}\n</style>`;
     }
-    return match; // если не нашли, оставляем как есть
+    return match;
 });
 
-// 4. Инлайним ВСЕ внешние JS (<script src="..."></script>)
-html = html.replace(/<script\s+[^>]*?src="([^"]+)"[^>]*><\/script>/g, (match, jsPath) => {
+// 4. Инлайним ВСЕ внешние JS и JSON-карты (<script src="...">)
+html = html.replace(/<script[^>]*?src="([^"]+)"[^>]*>[\s\S]*?<\/script>/g, (match, jsPath) => {
     const fullJsPath = path.join(buildPath, jsPath);
     if (fs.existsSync(fullJsPath)) {
         const jsContent = fs.readFileSync(fullJsPath, 'utf8');
-        console.log(`[JS] Встроено: ${jsPath}`);
-        // cocos 3 js файлы бывают модульными, поэтому сохраняем атрибут type="module" если он был
-        const typeMatch = match.match(/type="([^"]+)"/);
-        const typeAttr = typeMatch ? ` type="${typeMatch[1]}"` : '';
-        return `<script${typeAttr}>\n${jsContent}\n</script>`;
+        console.log(`[JS/JSON] Встроено: ${jsPath}`);
+
+        // Извлекаем все атрибуты скрипта, КРОМЕ src
+        let attrs = match.match(/<script([^>]*)>/)[1].replace(/src="[^"]+"/, '').trim();
+
+        // Для import-map типа
+        if (jsPath.endsWith('.json')) {
+            return `<script ${attrs}>\n${jsContent}\n</script>`;
+        }
+
+        return `<script ${attrs}>\n${jsContent}\n</script>`;
     }
     return match;
 });
@@ -80,13 +85,12 @@ function scanAssets(dir) {
             scanAssets(fullPath);
         } else {
             const relPath = path.relative(buildPath, fullPath).replace(/\\/g, '/');
-            // Игнорим уже встроенные html, css, js в корне
-            if (!relPath.startsWith('assets/') && Number(relPath.indexOf('/')) === -1) {
-                if (relPath.endsWith('.html') || relPath.endsWith('.css') || relPath.endsWith('.js')) continue;
-            }
+            // Игнорим только сам .html, .css и те js, которые мы УЖЕ заинлайнили в теги
+            if (relPath.endsWith('.html') || relPath.endsWith('.css')) continue;
+            if (relPath === 'src/polyfills.bundle.js' || relPath === 'src/system.bundle.js' || relPath === 'src/import-map.json') continue;
+
             const b64 = getBase64(fullPath);
             if (b64) {
-                // Избавляемся от лишнего хеша если нужно или оставляем точный путь
                 allAssets[relPath] = b64;
             }
         }
@@ -99,7 +103,7 @@ const xhrmock = `
 <script>
 window.__B64_ASSETS = ${JSON.stringify(allAssets)};
 
-// Override Fetch
+// Override Fetch for Cocos text/json assets
 const originalFetch = window.fetch;
 window.fetch = async function(url, options) {
     let lookupUrl = url;
@@ -145,7 +149,7 @@ window.fetch = async function(url, options) {
     return originalFetch(url, options);
 };
 
-// Override Image loading for Cocos
+// Override SystemJS fetch removed from here because System is undefined in head// Override Image loading for Cocos
 const OriginalImage = window.Image;
 window.Image = function() {
     const img = new OriginalImage();
@@ -224,14 +228,58 @@ window.XMLHttpRequest = function() {
 if (window.URL && window.URL.createObjectURL) {
     const originalCreate = window.URL.createObjectURL;
     window.URL.createObjectURL = function(obj) {
-        // если это базовая ссылка
         return originalCreate(obj);
     };
 }
+
+// Перехватываем динамическое создание скриптов (Cocos Engine Loader & SystemJS)
+const originalCreateElement = document.createElement;
+document.createElement = function(tagName) {
+    const el = originalCreateElement.call(document, tagName);
+    if (tagName.toLowerCase() === 'script') {
+        const originalSet = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src')?.set;
+        Object.defineProperty(el, 'src', {
+            get() { return this.getAttribute('src') || ''; },
+            set(val) {
+                let lookupUrl = typeof val === 'string' ? val.replace(/^[./]+/, '') : val;
+                let matchUrl = null;
+                
+                // Проверяем прямое совпадение
+                for(let k in window.__B64_ASSETS) {
+                    if (lookupUrl === k || (typeof val === 'string' && val.includes(k))) {
+                        matchUrl = k; break;
+                    }
+                }
+                
+                // Проверяем обрезку директорий, которые могут дублироваться
+                if (!matchUrl && typeof lookupUrl === 'string') {
+                    let trimUrl = lookupUrl;
+                    let idx = trimUrl.indexOf('assets/'); 
+                    if (idx !== -1) trimUrl = trimUrl.substring(idx);
+                    for(let k in window.__B64_ASSETS) {
+                        if (k.endsWith(trimUrl) || trimUrl.endsWith(k)) {
+                            matchUrl = k; break;
+                        }
+                    }
+                }
+
+                if (matchUrl && window.__B64_ASSETS[matchUrl]) {
+                    const b64 = window.__B64_ASSETS[matchUrl];
+                    if (originalSet) originalSet.call(this, b64);
+                    else this.setAttribute('src', b64);
+                } else {
+                    if (originalSet) originalSet.call(this, val);
+                    else this.setAttribute('src', val);
+                }
+            }
+        });
+    }
+    return el;
+};
 </script>
 `;
 
-// Вставляем перехватчик в <head>
+// Вставляем XHR/Fetch перехватчик в <head>
 html = html.replace('</head>', xhrmock + '\n</head>');
 
 // 6. Удаляем manifest.json если есть

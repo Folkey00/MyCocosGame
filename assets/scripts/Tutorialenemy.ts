@@ -6,9 +6,11 @@ const { ccclass, property } = _decorator;
 export class TutorialEnemy extends Component {
 
     @property(Node) promptNode: Node = null!;
-    @property speed: number = 200;
-    @property triggerX: number = 200;
+    @property({ tooltip: 'Расстояние до игрока, при котором игра ставится на паузу. Меньше = ближе к игроку' })
+    triggerX: number = 100;
     @property playerX: number = 0;
+
+    private speed: number = 0;
 
     private _prompted: boolean = false;
     private _done: boolean = false;
@@ -16,11 +18,20 @@ export class TutorialEnemy extends Component {
 
     protected start(): void {
         if (this.promptNode) this.promptNode.active = false;
+
+        // Автоматически ставим его на ту же самую высоту, что и остальных врагов (y = -185)
+        const pos = this.node.position;
+        this.node.setPosition(pos.x, -185, pos.z);
     }
 
     protected update(dt: number): void {
         const gm = GameManager.instance;
         if (!gm || gm.state !== GameState.PLAYING) return;
+
+        // Если туториал еще не дошел до паузы, двигаемся со скоростью всей остальной игры
+        if (!this._prompted) {
+            this.speed = gm.speed;
+        }
 
         // Первый кадр после старта — блокируем прыжок
         if (!this._started) {
@@ -85,7 +96,7 @@ export class TutorialEnemy extends Component {
             gm.endTutorial();
         }
 
-        // Враг быстро уходит влево — update() сам удалит его
-        this.speed = 500;
+        // Враг уходит влево чуть быстрее фона, чтобы быстро исчезнуть с экрана
+        this.speed = gm.speed + 200;
     }
 }

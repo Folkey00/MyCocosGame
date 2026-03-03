@@ -165,7 +165,7 @@
             }
           },
           "dragon-bones": {
-            "_value": false
+            "_value": true
           },
           "marionette": {
             "_value": false
@@ -199,6 +199,7 @@
           "animation",
           "base",
           "custom-pipeline",
+          "dragon-bones",
           "gfx-webgl",
           "gfx-webgl2",
           "graphics",

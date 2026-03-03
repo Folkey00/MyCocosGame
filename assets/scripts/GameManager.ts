@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Label, director, sys, UIOpacity, tween, UITransform, Sprite, Color, Vec3 } from 'cc';
+import { _decorator, Component, Node, Label, director, sys, UIOpacity, tween, UITransform, Sprite, Color, Vec3, view, ResolutionPolicy, Button, Graphics } from 'cc';
 const { ccclass, property } = _decorator;
 
 export enum GameState {
@@ -24,7 +24,6 @@ export class GameManager extends Component {
     @property(Label) paypalLbl: Label = null!;   // ← Label поверх синей части
     @property(Label) gameoverScoreLbl: Label = null!;  // Label "$0.00" на GameOverScreen
     @property(Label) gameWinScoreLbl: Label = null!;   // Label "$0.00" на GameWinScreen поверх карты
-    @property(Label) comboLbl: Label = null!;
 
     public state: GameState = GameState.IDLE;
     public score: number = 0;
@@ -47,9 +46,17 @@ export class GameManager extends Component {
         this._bestScore = sys.localStorage.getItem('bestScore')
             ? parseInt(sys.localStorage.getItem('bestScore')!) : 0;
 
+        // Фикс черных полос в альбомной ориентации
+        const frameSize = view.getFrameSize();
+        if (frameSize.width > frameSize.height) {
+            view.setDesignResolutionSize(720, 1280, ResolutionPolicy.FIXED_HEIGHT);
+        } else {
+            view.setDesignResolutionSize(720, 1280, ResolutionPolicy.FIXED_WIDTH);
+        }
+
         // Скрываем HUD со старта
-        this.startScreen.active = true;
-        this.gameoverScreen.active = false;
+        if (this.startScreen) this.startScreen.active = true;
+        if (this.gameoverScreen) this.gameoverScreen.active = false;
         if (this.gameWinScreen) this.gameWinScreen.active = false;
         if (this.hudNode) this.hudNode.active = false;
     }
@@ -60,25 +67,44 @@ export class GameManager extends Component {
 
     showStart(): void {
         this.state = GameState.IDLE;
-        this.startScreen.active = true;
-        this.gameoverScreen.active = false;
-        this.hudNode.active = false;
+        if (this.startScreen) this.startScreen.active = true;
+        if (this.gameoverScreen) this.gameoverScreen.active = false;
+        if (this.hudNode) this.hudNode.active = false;
+
+        // Удаляем черные фоны от прошлого проигрыша, если они остались на сцене (с Canvas)
+        const canvas = director.getScene()?.getChildByName('Canvas');
+        if (canvas) {
+            const oldBg1 = canvas.getChildByName('DarkBackground');
+            if (oldBg1) oldBg1.destroy();
+            const oldBg2 = canvas.getChildByName('DarkBackgroundWin');
+            if (oldBg2) oldBg2.destroy();
+        }
+
+        // Удаляем фоны, прикрепленные напрямую к родителям экранов (как мы делаем это в коде Game Over)
+        if (this.gameoverScreen && this.gameoverScreen.parent) {
+            const oldGoBg = this.gameoverScreen.parent.getChildByName('DarkBackground');
+            if (oldGoBg) oldGoBg.destroy();
+        }
+        if (this.gameWinScreen && this.gameWinScreen.parent) {
+            const oldWinBg = this.gameWinScreen.parent.getChildByName('DarkBackgroundWin');
+            if (oldWinBg) oldWinBg.destroy();
+        }
     }
 
     startGame(): void {
         this.score = 0;
         this.coins = 0;
         this.lives = 3;
-        this.speed = 450;
+        this.speed = 600; // Увеличенная начальная скорость (было 450)
         this.gameTime = 0;
         this._paypal = 0;
         this.jumpBlocked = false;
         this.inTutorial = true;
 
-        this.startScreen.active = false;
-        this.gameoverScreen.active = false;
+        if (this.startScreen) this.startScreen.active = false;
+        if (this.gameoverScreen) this.gameoverScreen.active = false;
         if (this.gameWinScreen) this.gameWinScreen.active = false;
-        this.hudNode.active = true;
+        if (this.hudNode) this.hudNode.active = true;
         this.state = GameState.PLAYING;
         this._updateHUD();
         this.node.emit('game-start');
@@ -126,7 +152,6 @@ export class GameManager extends Component {
     loseLife(): void {
         if (this.state !== GameState.PLAYING) return;
         this.lives = Math.max(0, this.lives - 1);
-        if (this.comboLbl) this.comboLbl.node.active = false;
         this._updateHUD();
         if (this.lives <= 0) this._triggerGameOver();
     }
@@ -138,9 +163,18 @@ export class GameManager extends Component {
         if (this.gameWinScreen) {
             this.gameWinScreen.active = true;
 
+            // Избегаем серого квадрата при наведении на кнопку Install
+            this.gameWinScreen.getComponentsInChildren(Button).forEach(btn => {
+                btn.transition = Button.Transition.SCALE;
+                btn.zoomScale = 0.95;
+                if ((btn as any).hoverSprite) (btn as any).hoverSprite = null;
+                btn.hoverColor = Color.WHITE;
+                btn.normalColor = Color.WHITE;
+            });
+
             // Если есть текст на карте для цифр
             if (this.gameWinScoreLbl) {
-                this.gameWinScoreLbl.string = `$${this._paypal.toFixed(2)}`;
+                this.gameWinScoreLbl.string = `${this._paypal.toFixed(2)}`;
             }
 
             // Добавляем анимацию свечения/лучей на фоне карты (gameWinEffect)
@@ -160,13 +194,15 @@ export class GameManager extends Component {
                     .start();
             }
 
-            // Плавное затемнение экрана (создаем черный фон на лету, как при GameOver)
+            // Плавное затемнение экрана (полупрозрачный черный фон)
             const darkBg = new Node('DarkBackgroundWin');
             const uiTrans = darkBg.addComponent(UITransform);
             uiTrans.setContentSize(3000, 3000);
 
-            const sprite = darkBg.addComponent(Sprite);
-            sprite.color = new Color(0, 0, 0, 255);
+            // Вместо Sprite используем Graphics, чтобы гарантированно закрасить фон черным
+            const graphics = darkBg.addComponent(Graphics);
+            graphics.fillColor = new Color(0, 0, 0, 255);
+            graphics.fillRect(-1500, -1500, 3000, 3000);
 
             const uiOpacity = darkBg.addComponent(UIOpacity);
             uiOpacity.opacity = 0;
@@ -176,12 +212,19 @@ export class GameManager extends Component {
                 darkBg.setSiblingIndex(this.gameWinScreen.getSiblingIndex());
             }
 
-            tween(uiOpacity).to(0.5, { opacity: 200 }).start();
+            // Затемняем фон до 180 (полупрозрачный), а не до 255
+            tween(uiOpacity).to(0.5, { opacity: 180 }).start();
+
+            // Анимация появления самой панели Победы (Bounce эффект)
+            this.gameWinScreen.scale = new Vec3(0.5, 0.5, 1);
+            tween(this.gameWinScreen)
+                .to(0.6, { scale: new Vec3(1.0, 1.0, 1) }, { easing: 'backOut' })
+                .start();
 
             let winOpacity = this.gameWinScreen.getComponent(UIOpacity);
             if (!winOpacity) winOpacity = this.gameWinScreen.addComponent(UIOpacity);
             winOpacity.opacity = 0;
-            tween(winOpacity).to(0.5, { opacity: 255 }).start();
+            tween(winOpacity).to(0.3, { opacity: 255 }).start();
         }
     }
 
@@ -194,15 +237,17 @@ export class GameManager extends Component {
 
         this.scheduleOnce(() => {
             this.state = GameState.GAMEOVER;
-            this.gameoverScreen.active = true;
+            if (this.gameoverScreen) this.gameoverScreen.active = true;
 
             // Плавное затемнение экрана (создаем черный фон на лету)
             const darkBg = new Node('DarkBackground');
             const uiTrans = darkBg.addComponent(UITransform);
             uiTrans.setContentSize(3000, 3000); // С запасом на любые экраны
 
-            const sprite = darkBg.addComponent(Sprite);
-            sprite.color = new Color(0, 0, 0, 255); // Черный цвет
+            // Вместо Sprite используем Graphics
+            const graphics = darkBg.addComponent(Graphics);
+            graphics.fillColor = new Color(0, 0, 0, 255); // Черный цвет
+            graphics.fillRect(-1500, -1500, 3000, 3000);
 
             const uiOpacity = darkBg.addComponent(UIOpacity);
             uiOpacity.opacity = 0;
@@ -213,18 +258,25 @@ export class GameManager extends Component {
                 darkBg.setSiblingIndex(this.gameoverScreen.getSiblingIndex()); // Ставим ровно ПЕРЕД gameoverScreen
             }
 
-            // Плавное появление затемнения (до ~80% непрозрачности)
+            // Плавное появление затемнения (до 180 непрозрачности - полупрозрачный)
             tween(uiOpacity)
-                .to(0.5, { opacity: 200 })
+                .to(0.5, { opacity: 180 })
                 .start();
 
-            // Плавно показываем сам экран Game Over, если на нем есть UIOpacity
-            let goOpacity = this.gameoverScreen.getComponent(UIOpacity);
-            if (!goOpacity) goOpacity = this.gameoverScreen.addComponent(UIOpacity);
-            goOpacity.opacity = 0;
-            tween(goOpacity).to(0.5, { opacity: 255 }).start();
+            // Анимация появления панели Game Over (Bounce эффект)
+            if (this.gameoverScreen) {
+                this.gameoverScreen.scale = new Vec3(0.5, 0.5, 1);
+                tween(this.gameoverScreen)
+                    .to(0.6, { scale: new Vec3(1.0, 1.0, 1) }, { easing: 'backOut' })
+                    .start();
 
-            if (this.gameoverScoreLbl) this.gameoverScoreLbl.string = `$${this._paypal.toFixed(2)}`;
+                let goOpacity = this.gameoverScreen.getComponent(UIOpacity);
+                if (!goOpacity) goOpacity = this.gameoverScreen.addComponent(UIOpacity);
+                goOpacity.opacity = 0;
+                tween(goOpacity).to(0.3, { opacity: 255 }).start();
+            }
+
+            if (this.gameoverScoreLbl) this.gameoverScoreLbl.string = `${this._paypal.toFixed(2)}`;
         }, 1.2);
     }
 
@@ -237,17 +289,17 @@ export class GameManager extends Component {
         // Условие появления финиша теперь обрабатывается в ObstacleManager
         // Ждём пока игрок добежит до физического объекта финишной черты
 
-        this.speed = Math.min(450 + this.gameTime * 25, 900);
+        this.speed = Math.min(600 + this.gameTime * 35, 1200); // Быстрее растет скорость, выше лимит
         // this.score += this.speed * dt * 0.02; // Очки больше не растут со временем
 
         this._updateHUD();
     }
     private _updateHUD(): void {
-        if (this.scoreLbl) this.scoreLbl.node.active = false; // Скрываем лейбл со счётом
+        if (this.scoreLbl && this.scoreLbl.node) this.scoreLbl.node.active = false; // Скрываем лейбл со счётом
         // PayPal label — показываем сумму в долларах
         if (this.paypalLbl) {
             this.paypalLbl.node.active = true;
-            this.paypalLbl.string = `$${this._paypal.toFixed(2)}`;
+            this.paypalLbl.string = `${this._paypal.toFixed(2)}`;
         }
     }
 }

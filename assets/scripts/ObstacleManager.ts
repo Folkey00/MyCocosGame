@@ -1,9 +1,9 @@
-import { _decorator, Component, Node, Prefab, instantiate, Vec3, RigidBody2D, BoxCollider2D, ERigidBody2DType, tween, Animation } from 'cc';
+import { _decorator, Component, Node, Prefab, instantiate, Vec3, RigidBody2D, BoxCollider2D, ERigidBody2DType, tween, Animation, view } from 'cc';
 import { GameManager, GameState } from './GameManager';
 const { ccclass, property } = _decorator;
 
 // Вместо userData используем WeakMap — хранит доп. данные по ноде
-const nodeData = new WeakMap<Node, { type: string; scored: boolean }>();
+const nodeData = new WeakMap<Node, { type: string; scored: boolean; speedMult?: number }>();
 
 @ccclass('ObstacleManager')
 export class ObstacleManager extends Component {
@@ -16,10 +16,10 @@ export class ObstacleManager extends Component {
     @property(Prefab) finishLinePrefab: Prefab = null!; // финишная линия (tag=5)
 
     // ── Spawn params (меняй в Inspector) ─────────────────
-    @property spawnX: number = 700;    // где спавнить (правый край)
+    @property spawnX: number = 1500;    // где спавнить (правый край)
     @property groundY: number = -250;   // Y поверхности земли
     @property flyingY: number = -80;    // Y для тарелки
-    @property despawnX: number = -750;   // где удалять (левый край)
+    @property despawnX: number = -1500;   // где удалять (левый край)
 
     private _timer: number = 1.5;
     private _coinTimer: number = 2.0;
@@ -28,6 +28,9 @@ export class ObstacleManager extends Component {
 
     protected start(): void {
         this.node.parent!.on('game-start', this._onStart, this);
+        // Запускаем объекты с большим запасом, чтобы в любом разрешении они появлялись глубоко за экраном
+        this.spawnX = (view.getVisibleSize().width / 2) + 500;
+        this.despawnX = -(view.getVisibleSize().width / 2) - 500;
     }
 
     private _onStart(): void {
@@ -55,14 +58,26 @@ export class ObstacleManager extends Component {
             this._timer -= dt;
             if (this._timer <= 0) {
                 this._spawnObstacle();
-                const base = Math.max(1.5, 3.5 - gm.gameTime * 0.03);
-                this._timer = base + (Math.random() * 0.6 - 0.3);
+                // Делаем появление препятствий быстрее, но с минимальным зазором
+                const base = Math.max(0.9, 2.0 - gm.gameTime * 0.05);
+                this._timer = base + (Math.random() * 0.5);
+
+                // Если монеты должны появиться прямо сейчас вместе с врагом, отодвигаем спавн врага
+                if (this._coinTimer < 0.5) {
+                    this._timer += 0.8;
+                }
             }
 
             this._coinTimer -= dt;
             if (this._coinTimer <= 0) {
                 this._spawnCoinRow();
-                this._coinTimer = 3.0 + Math.random() * 2.0;
+                // Делаем зазор между рядами монет случайным, но достаточно большим
+                this._coinTimer = 3.5 + Math.random() * 2.5;
+
+                // Отодвигаем спавн врагов, чтобы они не врезались в только что появившиеся монеты
+                if (this._timer < 0.8) {
+                    this._timer += 1.2;
+                }
             }
         }
 
@@ -76,9 +91,10 @@ export class ObstacleManager extends Component {
             }
 
             const pos = n.position;
-            const nx = pos.x - spd * dt;
-
             const data = nodeData.get(n);
+            const mult = data?.speedMult || 1.0;
+            const nx = pos.x - (spd * mult) * dt;
+
             if (data && !data.scored && nx < -50 && pos.x >= -50) {
                 data.scored = true;
                 if (data.type === 'obstacle') {
@@ -105,10 +121,12 @@ export class ObstacleManager extends Component {
             prefab = this.conePrefab;   // 50% конус
         } else {
             prefab = this.enemyPrefab;  // 50% мужик
+            y += 35; // поднимаем врага повыше, так как его модель может уходить в землю
         }
 
         const node = instantiate(prefab);
-        nodeData.set(node, { type: 'obstacle', scored: false });
+        // Враги (isEnemy = true) будут двигаться в 1.6 раза быстрее фона, имитируя бег навстречу
+        nodeData.set(node, { type: 'obstacle', scored: false, speedMult: isEnemy ? 1.6 : 1.0 });
 
         // Удаляем скрипт TutorialEnemy, чтобы он не ломал параметры игры (не блокировал прыжки)
         const tut = node.getComponent('TutorialEnemy');
@@ -131,18 +149,21 @@ export class ObstacleManager extends Component {
 
         // Разные хитбоксы для врага и конуса
         if (isEnemy) {
+            // У врага хитбокс немного опускаем, чтобы он казался стоящим на земле, а не висящим
             col.size.set(60, 150);
-            col.offset.set(0, 0);
+            col.offset.set(0, -20);
 
-            // Запускаем нативную анимацию, если она есть
-            const anim = node.getComponent(Animation);
-            if (anim && anim.clips.length > 0) {
-                anim.play(anim.clips[0]?.name);
-            }
+            // Запускаем скриптовую "живую" анимацию (Дыхание / Прыжки) вместо проблемной покадровой
+            tween(node)
+                .to(0.3, { scale: new Vec3(1.05, 0.95, 1) }, { easing: 'sineOut' }) // Сжимается
+                .to(0.3, { scale: new Vec3(0.95, 1.05, 1) }, { easing: 'sineIn' })  // Растягивается
+                .union()
+                .repeatForever()
+                .start();
         } else {
             // У конуса хитбокс пониже
             col.size.set(70, 80);
-            col.offset.set(0, -35);
+            col.offset.set(0, -45); // Опускаем конус чуть ниже
         }
 
         node.setPosition(this.spawnX, y, 0);
@@ -195,7 +216,9 @@ export class ObstacleManager extends Component {
         // Если должна быть карточка, выбираем случайное место для нее в этом ряду
         const cardIndex = isCard ? Math.floor(Math.random() * count) : -1;
 
-        const patternType = Math.floor(Math.random() * 3); // 0: ряд, 1: дуга, 2: волна
+        // 0: ряд, 1: дуга, 2: волна
+        // Дуга убрана для карточек, чтобы карточки не спавнились слишком высоко или слишком низко
+        const patternType = isCard ? (Math.random() > 0.5 ? 0 : 2) : Math.floor(Math.random() * 3);
 
         for (let i = 0; i < count; i++) {
             const prefab = (i === cardIndex) ? this.cardPrefab : this.coinPrefab;

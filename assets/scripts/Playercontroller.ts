@@ -1,7 +1,7 @@
 import {
     _decorator, Component, RigidBody2D, input, Input, EventTouch,
-    KeyCode, EventKeyboard, Vec2, Animation, AnimationState, Collider2D,
-    Contact2DType, IPhysics2DContact, UIOpacity, Node, tween, Vec3
+    KeyCode, EventKeyboard, Vec2, Collider2D,
+    Contact2DType, IPhysics2DContact, UIOpacity, Node, tween, Vec3, dragonBones
 } from 'cc';
 import { GameManager, GameState } from './GameManager';
 const { ccclass, property } = _decorator;
@@ -13,7 +13,17 @@ const INVINCIBLE_TIME = 1.5;
 export class PlayerController extends Component {
 
     @property(RigidBody2D) rb: RigidBody2D = null!;
-    @property(Animation) anim: Animation = null!;
+    @property(dragonBones.ArmatureDisplay) anim: dragonBones.ArmatureDisplay = null!;
+
+    // ── Animations ──────────────────────────────────────
+    @property({ group: { name: 'Animations' }, tooltip: 'Название анимации бега в DragonBones' })
+    runAnimName: string = 'run';
+    @property({ group: { name: 'Animations' }, tooltip: 'Название анимации прыжка' })
+    jumpAnimName: string = 'jump';
+    @property({ group: { name: 'Animations' }, tooltip: 'Название анимации получения урона' })
+    damageAnimName: string = 'damage';
+    @property({ group: { name: 'Animations' }, tooltip: 'Название анимации смерти' })
+    deadAnimName: string = 'dead';
 
     private _onGround: boolean = true;
     private _invincible: number = 0;
@@ -40,9 +50,18 @@ export class PlayerController extends Component {
         this.node.parent!.on('game-start', this._onGameStart, this);
 
         if (this.anim) {
-            this.anim.on(Animation.EventType.FINISHED, (_t: string, state: AnimationState) => {
-                if (state.name === 'jump' && !this._dead) this._playRun();
-            }, this);
+            this.anim.on(dragonBones.EventObject.COMPLETE, this._onAnimComplete, this);
+        }
+    }
+
+    private _onAnimComplete(event: dragonBones.EventObject): void {
+        if (!event.animationState || this._dead) return;
+        const name = event.animationState.name;
+        // Если закончилась анимация прыжка или получения урона - возвращаемся к бегу
+        if (name === this.jumpAnimName || name === this.damageAnimName || name === 'hit') {
+            if (this._onGround) {
+                this._playRun();
+            }
         }
     }
 
@@ -90,9 +109,15 @@ export class PlayerController extends Component {
     }
 
     private _onContactBegin(_self: Collider2D, other: Collider2D, _c: IPhysics2DContact): void {
+        const gm = GameManager.instance;
+
         if (other.tag === 1) {
             this._land();
         }
+
+        // Игнорируем столкновения с врагами/монетами/финишем, если игра еще не началась (пока игрок на стартовом экране)
+        if (!gm || gm.state !== GameState.PLAYING) return;
+
         if (other.tag === 2) this._handleHit();
         if (other.tag === 3) {
             this._flyItemToHUD(other.node, 'coin');
@@ -102,8 +127,7 @@ export class PlayerController extends Component {
         }
         if (other.tag === 5) {
             // Коллизия с финишной линией
-            const gm = GameManager.instance;
-            if (gm && typeof (gm as any).triggerGameWin === 'function') {
+            if (typeof (gm as any).triggerGameWin === 'function') {
                 (gm as any).triggerGameWin();
             }
         }
@@ -115,7 +139,11 @@ export class PlayerController extends Component {
 
         // Выключаем коллайдер, чтобы он больше не триггерил коллизии
         const col = itemNode.getComponent(Collider2D);
-        if (col) col.enabled = false;
+        if (col) {
+            this.scheduleOnce(() => {
+                if (col.isValid) col.enabled = false;
+            }, 0);
+        }
 
         // Флаг для ObstacleManager, чтобы он отстал от этого предмета и не двигал его
         (itemNode as any)._isCollected = true;
@@ -151,16 +179,17 @@ export class PlayerController extends Component {
         } else {
             this._invincible = INVINCIBLE_TIME;
             this._flashInvincible();
+            this._playDamage();
         }
     }
 
     protected update(dt: number): void {
         const gm = GameManager.instance;
 
-        if (gm?.paused) {
-            this.anim?.pause();
+        if (gm?.paused || this._dead) {
+            if (this.anim) this.anim.timeScale = 0;
         } else {
-            this.anim?.resume();
+            if (this.anim) this.anim.timeScale = 1;
         }
 
         if (this._invincible > 0) this._invincible -= dt;
@@ -183,9 +212,53 @@ export class PlayerController extends Component {
         }
     }
 
-    private _playRun(): void { this.anim?.play('run'); }
-    private _playJump(): void { this.anim?.play('jump'); }
-    private _playDead(): void { this.anim?.stop(); }
+    private _playRun(): void {
+        const armature = this.anim?.armature();
+        if (!this.anim || !armature || !armature.animation) return;
+
+        if (armature.animation.hasAnimation(this.runAnimName)) {
+            this.anim.playAnimation(this.runAnimName, 0);
+        } else {
+            // Если указанной анимации нет, проигрываем ту, которая выбрана в редакторе по умолчанию
+            const defaultAnim = this.anim.animationName;
+            if (defaultAnim && armature.animation.hasAnimation(defaultAnim)) {
+                this.anim.playAnimation(defaultAnim, 0);
+            } else {
+                this.anim.playAnimation('', 0);
+            }
+        }
+    }
+    private _playJump(): void {
+        const armature = this.anim?.armature();
+        if (!this.anim || !armature || !armature.animation) return;
+
+        if (armature.animation.hasAnimation(this.jumpAnimName)) {
+            this.anim.playAnimation(this.jumpAnimName, 1);
+        } else {
+            const defaultAnim = this.anim.animationName;
+            if (defaultAnim && armature.animation.hasAnimation(defaultAnim)) {
+                this.anim.playAnimation(defaultAnim, 1);
+            }
+        }
+    }
+    private _playDamage(): void {
+        const armature = this.anim?.armature();
+        if (!this.anim || !armature || !armature.animation) return;
+
+        if (armature.animation.hasAnimation(this.damageAnimName)) {
+            this.anim.playAnimation(this.damageAnimName, 1);
+        } else if (armature.animation.hasAnimation('hit')) {
+            this.anim.playAnimation('hit', 1);
+        }
+    }
+    private _playDead(): void {
+        const armature = this.anim?.armature();
+        if (armature && armature.animation && armature.animation.hasAnimation(this.deadAnimName)) {
+            this.anim.playAnimation(this.deadAnimName, 1);
+        } else {
+            if (this.anim) this.anim.timeScale = 0;
+        }
+    }
 
     private _flashInvincible(): void {
         const opacity = this.getComponent(UIOpacity) ?? this.addComponent(UIOpacity);

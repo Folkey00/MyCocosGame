@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, tween, Vec3 } from 'cc';
+import { _decorator, Component, Node, tween, Vec3, Sprite } from 'cc';
 import { GameManager, GameState } from './GameManager';
 const { ccclass, property } = _decorator;
 
@@ -22,15 +22,24 @@ export class TutorialEnemy extends Component {
         // Автоматически ставим его на ту же самую высоту, что и остальных врагов (y = -185)
         const pos = this.node.position;
         this.node.setPosition(pos.x, -185, pos.z);
+
+        // Поворачиваем спрайт лицом влево (к игроку)
+        const sprite = this.getComponent(Sprite);
+        if (sprite) {
+            sprite.spriteFrame.flipUVX = true; // Для 2D спрайтов часто используется flipUVX или scale.x = -1
+        } else {
+            // Либо разворачиваем саму ноду (надежнее, так как там может быть анимация)
+            this.node.setScale(new Vec3(-1, 1, 1));
+        }
     }
 
     protected update(dt: number): void {
         const gm = GameManager.instance;
         if (!gm || gm.state !== GameState.PLAYING) return;
 
-        // Если туториал еще не дошел до паузы, двигаемся со скоростью всей остальной игры
+        // Если туториал еще не дошел до паузы, он бежит на игрока БЫСТРЕЕ фона
         if (!this._prompted) {
-            this.speed = gm.speed;
+            this.speed = gm.speed + 300; // Добавляем 300 к скорости фона (как у обычных врагов)
         }
 
         // Первый кадр после старта — блокируем прыжок
@@ -45,8 +54,8 @@ export class TutorialEnemy extends Component {
             const nx = pos.x - this.speed * dt;
             this.node.setPosition(nx, pos.y, pos.z);
 
-            // Удаляем когда ушли за левый край
-            if (nx < -800) {
+            // Удаляем когда ушли далеко за левый край экрана (исчезает позже)
+            if (nx < -1500) {
                 gm.endTutorial();
                 this.node.destroy();
                 return;
@@ -96,7 +105,7 @@ export class TutorialEnemy extends Component {
             gm.endTutorial();
         }
 
-        // Враг уходит влево чуть быстрее фона, чтобы быстро исчезнуть с экрана
-        this.speed = gm.speed + 200;
+        // Враг убегает дальше после прыжка игрока
+        this.speed = gm.speed + 350;
     }
 }
